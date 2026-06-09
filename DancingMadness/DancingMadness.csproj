@@ -1,0 +1,102 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Platforms>AnyCPU;x64</Platforms>
+    <Configurations>Debug (Full);Release (Full);Debug (Mini);Release (Mini)</Configurations>
+  </PropertyGroup>
+  
+  <PropertyGroup>
+    <DalamudLibPath>$(appdata)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  
+  <PropertyGroup Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Linux)))'">
+    <DalamudLibPath>$(DALAMUD_HOME)/</DalamudLibPath>
+  </PropertyGroup>
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (Full)|AnyCPU'" />
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (Mini)|AnyCPU'">
+    <DefineConstants>$(DefineConstants);SANS_GOETIA</DefineConstants>
+  </PropertyGroup>
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (Full)|x64'" />
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug (Full)|AnyCPU'" />
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug (Mini)|AnyCPU'">
+    <DefineConstants>$(DefineConstants);SANS_GOETIA</DefineConstants>
+  </PropertyGroup>
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug (Full)|x64'" />
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug (Mini)|x64'">
+    <DefineConstants>$(DefineConstants);SANS_GOETIA</DefineConstants>
+  </PropertyGroup>
+  
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (Mini)|x64'">
+    <DefineConstants>$(DefineConstants);SANS_GOETIA</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Dalamud">
+      <HintPath>$(DalamudLibPath)Dalamud.dll</HintPath>
+	  <Private>false</Private>
+    </Reference>
+    <Reference Include="FFXIVClientStructs">
+      <HintPath>$(DalamudLibPath)FFXIVClientStructs.dll</HintPath>
+	  <Private>false</Private>
+    </Reference>
+    <Reference Include="InteropGenerator.Runtime">
+      <HintPath>$(DalamudLibPath)InteropGenerator.Runtime.dll</HintPath>
+	  <Private>false</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(DalamudLibPath)Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ImGuiScene">
+      <HintPath>$(DalamudLibPath)ImGuiScene.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Lumina">
+      <HintPath>$(DalamudLibPath)Lumina.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Lumina.Excel">
+      <HintPath>$(DalamudLibPath)Lumina.Excel.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Plugin manifest metadata, read by DalamudPackager -->
+  <PropertyGroup>
+    <Version>1.0.4.0</Version>
+    <Author>Sneakiestbear</Author>
+    <Name>Dancing Madness</Name>
+    <Punchline>Dancing Mad (Ultimate) raid markers.</Punchline>
+    <Description>Adds support for the Dancing Mad (Ultimate) encounter, including an automarker for the Forsaken tower/AoE sequence (configurable tower order, priority, and per-role markers). A fork of Lemegeton by Paissa Heavy Industries.</Description>
+    <ApplicableVersion>any</ApplicableVersion>
+    <RepoUrl>https://github.com/SneakiestBear/Dancing-Madness</RepoUrl>
+    <Tags>raid;ultimate;automarker;kefka</Tags>
+  </PropertyGroup>
+
+  <!-- The default DalamudPackager targets only fire on a config literally named
+       "Release"; this project uses "Release (Full)"/"Release (Mini)", so package here. -->
+  <Target Name="PackageDancingMadness" AfterTargets="Build" Condition="$(Configuration.StartsWith('Release'))">
+    <DalamudPackager ProjectDir="$(ProjectDir)"
+                     OutputPath="$(OutputPath)"
+                     AssemblyName="$(AssemblyName)"
+                     MakeZip="true"
+                     Author="$(Author)"
+                     Name="$(Name)"
+                     Punchline="$(Punchline)"
+                     Description="$(Description)"
+                     ApplicableVersion="$(ApplicableVersion)"
+                     RepoUrl="$(RepoUrl)"
+                     Tags="$(Tags)"
+                     DalamudApiLevel="$(DalamudApiLevel)" />
+  </Target>
+
+</Project>

@@ -1,0 +1,36 @@
+﻿using DancingMadness.Core;
+using System.Xml.Serialization;
+
+namespace DancingMadness.Action
+{
+
+    public class ChatMessage : Core.Action
+    {
+
+        public enum ChatSeverityEnum
+        {
+            Normal,
+            Error,
+        }
+
+        [XmlAttribute]
+        public ChatSeverityEnum ChatSeverity { get; set; } = ChatSeverityEnum.Normal;
+        [XmlAttribute]
+        public string Text { get; set; } = "";
+
+        public override void Execute(Context ctx)
+        {            
+            switch (ChatSeverity)
+            {
+                case ChatSeverityEnum.Normal:
+                    ctx.State.cg.Print(ctx.ParseText(this, Text));
+                    break;
+                case ChatSeverityEnum.Error:
+                    ctx.State.cg.PrintError(ctx.ParseText(this, Text));
+                    break;
+            }
+        }
+
+    }
+
+}

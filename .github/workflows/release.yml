@@ -1,0 +1,46 @@
+name: Release
+
+# Build and publish the plugin zip as a GitHub Release whenever a version tag is pushed.
+# repo.json's DownloadLink points at the "latest release" asset, so it updates automatically.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Dalamud
+        shell: pwsh
+        run: |
+          # Extract to the SDK's default path so Dalamud.NET.Sdk finds it.
+          $dalamud = "$env:APPDATA\XIVLauncher\addon\Hooks\dev"
+          New-Item -ItemType Directory -Force -Path $dalamud | Out-Null
+          Invoke-WebRequest -Uri "https://goatcorp.github.io/dalamud-distrib/latest.zip" -OutFile "$env:RUNNER_TEMP/dalamud.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP/dalamud.zip" -DestinationPath $dalamud -Force
+
+      - name: Build (Release Full)
+        shell: pwsh
+        run: dotnet build "DancingMadness/DancingMadness.csproj" -c "Release (Full)"
+
+      - name: Stage artifact
+        shell: pwsh
+        # Copy to a paren-free path so the release upload glob doesn't treat "(Full)" as a pattern.
+        run: Copy-Item "DancingMadness/bin/Release (Full)/DancingMadness/latest.zip" "latest.zip"
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.zip

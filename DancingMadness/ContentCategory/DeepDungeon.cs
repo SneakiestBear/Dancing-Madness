@@ -1,0 +1,38 @@
+﻿using DancingMadness.Content;
+using DancingMadness.Core;
+using System.Collections.Generic;
+
+namespace DancingMadness.ContentCategory
+{
+
+    public class DeepDungeon : Core.ContentCategory
+    {
+
+        public override FeaturesEnum Features => FeaturesEnum.None;
+
+        public override ContentCategoryTypeEnum ContentCategoryType => ContentCategoryTypeEnum.Content;
+
+        protected override Dictionary<string, Core.ContentCategory> InitializeSubcategories(State st)
+        {
+            Dictionary<string, Core.ContentCategory> items = new Dictionary<string, Core.ContentCategory>();
+            return items;
+        }
+
+        protected override Dictionary<string, Core.Content> InitializeContentItems(State st)
+        {
+            Dictionary<string, Core.Content> items = new Dictionary<string, Core.Content>();
+            items["PalaceOfTheDead"] = new PalaceOfTheDead(st);
+            items["HeavenOnHigh"] = new HeavenOnHigh(st);
+            items["EurekaOrthos"] = new EurekaOrthos(st);
+            items["PilgrimsTraverse"] = new PilgrimsTraverse(st);
+            return items;
+        }
+
+        public DeepDungeon(State st) : base(st)
+        {
+            Enabled = false;
+        }
+
+    }
+
+}

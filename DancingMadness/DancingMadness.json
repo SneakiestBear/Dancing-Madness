@@ -1,0 +1,9 @@
+{
+  "Author": "Sneakiestbear",
+  "Name": "Dancing Madness",
+  "Punchline": "Dancing Mad (Ultimate) raid markers.",
+  "Description": "Adds support for the Dancing Mad (Ultimate) encounter, including an automarker for the Forsaken tower/AoE sequence (configurable tower order, priority, and per-role markers). A fork of Lemegeton by Paissa Heavy Industries.",
+  "RepoUrl": "https://github.com/SneakiestBear/Dancing-Madness",
+  "ApplicableVersion": "any",
+  "Tags": [ "raid", "ultimate", "automarker", "dancing mad", "kefka" ]
+}
