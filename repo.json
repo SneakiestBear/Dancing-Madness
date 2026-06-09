@@ -3,7 +3,7 @@
     "Author": "Sneakiestbear",
     "Name": "Dancing Madness",
     "InternalName": "DancingMadness",
-    "AssemblyVersion": "1.0.4.0",
+    "AssemblyVersion": "1.0.5.0",
     "Description": "Adds support for the Dancing Mad (Ultimate) encounter, including an automarker for the Forsaken tower/AoE sequence (configurable tower order, priority, and per-role markers). A fork of Lemegeton by Paissa Heavy Industries.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/SneakiestBear/Dancing-Madness",

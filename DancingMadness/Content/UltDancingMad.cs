@@ -182,6 +182,13 @@ namespace DancingMadness.Content
             private List<uint> _stack = new List<uint>();
             private List<uint> _aoe = new List<uint>();
             private List<uint> _cone = new List<uint>();
+            // This wave's raw (un-normalized) headmarkers, actorId -> raw markerId. The live
+            // game sends the canonical icon ids plus a per-session offset; we learn that
+            // offset from the first wave and normalize. (The simulator feeds canonical ids,
+            // so it learns an offset of 0.)
+            private Dictionary<uint, uint> _pendingRaw = new Dictionary<uint, uint>();
+            private bool _offsetKnown = false;
+            private uint _headmarkerOffset = 0;
             // Group A (2 stacks + their locked buddies) and Group B (the other 4),
             // decided once on the first wave; plus each player's current category.
             private List<uint> _groupA = new List<uint>();
@@ -254,6 +261,9 @@ namespace DancingMadness.Content
                 _stack.Clear();
                 _aoe.Clear();
                 _cone.Clear();
+                _pendingRaw.Clear();
+                _offsetKnown = false;
+                _headmarkerOffset = 0;
                 _groupA.Clear();
                 _groupB.Clear();
                 _current.Clear();
@@ -279,20 +289,9 @@ namespace DancingMadness.Content
                 {
                     return;
                 }
-                switch (markerId)
-                {
-                    case HeadmarkerStack:
-                        if (_stack.Contains(actorId) == false) { _stack.Add(actorId); }
-                        break;
-                    case HeadmarkerAoe:
-                        if (_aoe.Contains(actorId) == false) { _aoe.Add(actorId); }
-                        break;
-                    case HeadmarkerCone:
-                        if (_cone.Contains(actorId) == false) { _cone.Add(actorId); }
-                        break;
-                    default:
-                        return;
-                }
+                // Buffer the raw id; it's normalized and categorized in ProcessWave once the
+                // burst settles, so the per-session offset can be learned from the whole wave.
+                _pendingRaw[actorId] = markerId;
                 _lastMarkerTime = DateTime.Now;
                 _wavePending = true;
             }
@@ -324,6 +323,9 @@ namespace DancingMadness.Content
                     _stack.Clear();
                     _aoe.Clear();
                     _cone.Clear();
+                    _pendingRaw.Clear();
+                    _offsetKnown = false;
+                    _headmarkerOffset = 0;
                     if (_current.Count > 0)
                     {
                         _current.Clear();
@@ -393,6 +395,31 @@ namespace DancingMadness.Content
             private void ProcessWave()
             {
                 _wavePending = false;
+                // Normalize this wave's raw headmarkers into categories. The three Forsaken
+                // ids are consecutive (stack < AoE < cone), so the stack is the lowest; the
+                // per-session offset is learned once as (lowest raw id) - canonical stack id.
+                if (_pendingRaw.Count > 0)
+                {
+                    if (_offsetKnown == false)
+                    {
+                        uint min = uint.MaxValue;
+                        foreach (uint raw in _pendingRaw.Values)
+                        {
+                            if (raw < min) { min = raw; }
+                        }
+                        _headmarkerOffset = min - HeadmarkerStack;
+                        _offsetKnown = true;
+                        Log(State.LogLevelEnum.Info, null, "[Forsaken] learned headmarker offset 0x{0:X} (raw 0x{1:X} = stack)", _headmarkerOffset, min);
+                    }
+                    foreach (KeyValuePair<uint, uint> kp in _pendingRaw)
+                    {
+                        uint norm = kp.Value - _headmarkerOffset;
+                        if (norm == HeadmarkerStack) { if (_stack.Contains(kp.Key) == false) { _stack.Add(kp.Key); } }
+                        else if (norm == HeadmarkerAoe) { if (_aoe.Contains(kp.Key) == false) { _aoe.Add(kp.Key); } }
+                        else if (norm == HeadmarkerCone) { if (_cone.Contains(kp.Key) == false) { _cone.Add(kp.Key); } }
+                    }
+                    _pendingRaw.Clear();
+                }
                 if (_firstWaveDone == false)
                 {
                     Party pty = _state.GetPartyMembers();
@@ -714,7 +741,7 @@ namespace DancingMadness.Content
                     return;
                 }
                 _subbed = true;
-                Log(LogLevelEnum.Debug, null, "Subscribing to events");
+                Log(LogLevelEnum.Debug, null, "[Forsaken] subscribing to live events");
                 _state.OnCastBegin += OnCastBegin;
                 _state.OnAction += OnAction;
                 _state.OnHeadMarker += OnHeadMarker;
@@ -741,6 +768,7 @@ namespace DancingMadness.Content
         {
             if (actionId == AbilityForsaken)
             {
+                Log(LogLevelEnum.Debug, null, "[Forsaken] cast detected -> arming automarker");
                 _forsakenAm.Arm();
             }
         }
@@ -749,6 +777,7 @@ namespace DancingMadness.Content
         {
             if (actionId == AbilityPathOfLight)
             {
+                Log(LogLevelEnum.Debug, null, "[Forsaken] tower (Path of Light) detected");
                 _forsakenAm.FeedTower();
             }
         }
