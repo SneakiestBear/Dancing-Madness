@@ -1544,6 +1544,16 @@ namespace DancingMadness.Language
             AddEntry("Content/Ultimate/UltDancingMad/ForsakenAM/Simulate/Forsaken", "Forsaken cast");
             AddEntry("Content/Ultimate/UltDancingMad/ForsakenAM/Simulate/Tower", "Tower");
             AddEntry("Content/Ultimate/UltDancingMad/ForsakenAM/Test", "Test random assignment");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM", "(Phase 3 - Earthquake) Accretion chain automarker");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Enabled", "Enabled");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/SelfMarkOnly", "Self-marking only");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/AsSoftmarker", "Show as client-side soft markers");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Signs", "Marker configuration");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Signs/Chain1", "Chain 1 (Accretion + First in Line)");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Signs/Chain2", "Chain 2 (Accretion + Second in Line)");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Timing", "Marker timing");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Simulate", "Simulate (debug): need a party in a duty. Marks a healer (Chain 1) and a DPS (Chain 2) as if Accretion just resolved.");
+            AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Simulate/Earthquake", "Simulate Earthquake");
             #endregion
             #region RSV abilities
             AddEntry("RSV/Ability_33127", "Front Combination");

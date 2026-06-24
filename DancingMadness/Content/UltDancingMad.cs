@@ -26,6 +26,7 @@ namespace DancingMadness.Content
         private bool _subbed = false;
 
         private ForsakenAM _forsakenAm;
+        private EarthquakeAM _earthquakeAm;
 
         #region ForsakenAM
 
@@ -719,6 +720,224 @@ namespace DancingMadness.Content
 
         #endregion
 
+        #region EarthquakeAM
+
+        // Phase 3 "Earthquake": Accretion (0x644) lands on two players (one healer, one DPS)
+        // at the same instant as the shared "in line" debuffs. The Accretion holder who also
+        // has First in Line takes Chain 1; the one who also has Second in Line takes Chain 2.
+        public class EarthquakeAM : Automarker
+        {
+
+            [AttributeOrderNumber(1000)]
+            public AutomarkerSigns Signs { get; set; }
+
+            public class SimulatorWidget : CustomPropertyInterface
+            {
+
+                private EarthquakeAM _am;
+
+                public SimulatorWidget(EarthquakeAM am)
+                {
+                    _am = am;
+                }
+
+                public override string Serialize()
+                {
+                    return "";
+                }
+
+                public override void Deserialize(string data)
+                {
+                }
+
+                public override void RenderEditor(string path)
+                {
+                    ImGui.TextWrapped(I18n.Translate(path));
+                    if (ImGui.Button(I18n.Translate(path + "/Earthquake") + "##simquake") == true)
+                    {
+                        _am.SimEarthquake();
+                    }
+                }
+
+            }
+
+            [DebugOption]
+            [AttributeOrderNumber(2200)]
+            public SimulatorWidget Simulate { get; set; }
+
+            [DebugOption]
+            [AttributeOrderNumber(2500)]
+            public AutomarkerTiming Timing { get; set; }
+
+            // Shared "in line" debuffs (also used by The Omega Protocol); Accretion picks the
+            // two chain takers out of the eight.
+            internal const uint StatusAccretion = 0x644;
+            internal const uint StatusFirstInLine = 0xBBC;
+            internal const uint StatusSecondInLine = 0xBBD;
+
+            private const double StatusDebounceSeconds = 0.5;
+
+            private HashSet<uint> _accretion = new HashSet<uint>();
+            private HashSet<uint> _first = new HashSet<uint>();
+            private HashSet<uint> _second = new HashSet<uint>();
+            // Actors currently wearing a chain mark, so we can clear each one individually
+            // when its in-line debuff falls off.
+            private HashSet<uint> _marked = new HashSet<uint>();
+            private bool _pending = false;
+            private bool _placed = false;
+            private DateTime _lastStatus = DateTime.MinValue;
+
+            public EarthquakeAM(State state) : base(state)
+            {
+                Signs = new AutomarkerSigns();
+                Signs.SetRole("Chain1", AutomarkerSigns.SignEnum.Bind1, false);
+                Signs.SetRole("Chain2", AutomarkerSigns.SignEnum.Bind2, false);
+                Simulate = new SimulatorWidget(this);
+                // Only two marks, so a fast but rate-limit-safe profile is plenty.
+                Timing = new AutomarkerTiming()
+                {
+                    TimingType = AutomarkerTiming.TimingTypeEnum.Explicit,
+                    IniDelayMin = 0.1f,
+                    IniDelayMax = 0.2f,
+                    SubDelayMin = 0.1f,
+                    SubDelayMax = 0.15f,
+                };
+            }
+
+            public override void Reset()
+            {
+                _accretion.Clear();
+                _first.Clear();
+                _second.Clear();
+                _marked.Clear();
+                _pending = false;
+                if (_placed == true)
+                {
+                    _placed = false;
+                    _state.ClearAutoMarkers();
+                }
+            }
+
+            // Live: the parent forwards Accretion / First / Second in Line gains and losses.
+            public void FeedStatus(uint actorId, uint statusId, bool gained)
+            {
+                if (Active == false)
+                {
+                    return;
+                }
+                if (gained == false)
+                {
+                    // A chain holder's own in-line debuff falling off means that player has
+                    // resolved -> clear just their mark. Accretion drops earlier and must NOT
+                    // trigger a clear, so only First/Second in Line count here.
+                    if ((statusId == StatusFirstInLine || statusId == StatusSecondInLine) && _marked.Contains(actorId) == true)
+                    {
+                        ClearOne(actorId);
+                    }
+                    return;
+                }
+                if (statusId == StatusAccretion) { _accretion.Add(actorId); }
+                else if (statusId == StatusFirstInLine) { _first.Add(actorId); }
+                else if (statusId == StatusSecondInLine) { _second.Add(actorId); }
+                else { return; }
+                _lastStatus = DateTime.Now;
+                _pending = true;
+            }
+
+            private void ClearOne(uint actorId)
+            {
+                Party.PartyMember pm = _state.GetPartyMembers().GetByActorId(actorId);
+                if (pm != null && pm.GameObject != null)
+                {
+                    _state.ClearMarkerOn(pm.GameObject, true, true);
+                }
+                _marked.Remove(actorId);
+                _accretion.Remove(actorId);
+                _first.Remove(actorId);
+                _second.Remove(actorId);
+                if (_marked.Count == 0)
+                {
+                    _placed = false;
+                }
+            }
+
+            protected override bool ExecutionImplementation()
+            {
+                // The debuffs land in one burst; place once it settles.
+                if (_pending == true && (DateTime.Now - _lastStatus).TotalSeconds >= StatusDebounceSeconds)
+                {
+                    _pending = false;
+                    PlaceMarkers();
+                }
+                return true;
+            }
+
+            private void PlaceMarkers()
+            {
+                if (_accretion.Count == 0)
+                {
+                    return;
+                }
+                Party pty = _state.GetPartyMembers();
+                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                // Chain 1 = the Accretion holder who also has First in Line; Chain 2 = the
+                // Accretion holder who also has Second in Line.
+                _marked.Clear();
+                foreach (uint id in _accretion)
+                {
+                    string role = null;
+                    if (_first.Contains(id) == true) { role = "Chain1"; }
+                    else if (_second.Contains(id) == true) { role = "Chain2"; }
+                    if (role == null) { continue; }
+                    Party.PartyMember pm = pty.GetByActorId(id);
+                    if (pm != null && pm.GameObject != null)
+                    {
+                        ap.Assign(Signs.Roles[role], pm.GameObject);
+                        _marked.Add(id);
+                    }
+                }
+                _state.ClearAutoMarkers();
+                _state.ExecuteAutomarkers(ap, Timing);
+                _placed = true;
+            }
+
+            // Debug: stamp Accretion+First on a healer (-> Chain 1) and Accretion+Second on a
+            // DPS (-> Chain 2), mirroring a real resolve. Falls back to the first two players.
+            public void SimEarthquake()
+            {
+                if (Active == false)
+                {
+                    return;
+                }
+                Party pty = _state.GetPartyMembers();
+                List<Party.PartyMember> members = (from m in pty.Members where m.GameObject != null orderby m.Index select m).ToList();
+                if (members.Count == 0)
+                {
+                    return;
+                }
+                Reset();
+                Party.PartyMember healer = members.FirstOrDefault(m => AutomarkerPrio.JobToRole(m.Job) == AutomarkerPrio.PrioRoleEnum.Healer);
+                Party.PartyMember dps = members.FirstOrDefault(m =>
+                {
+                    AutomarkerPrio.PrioRoleEnum r = AutomarkerPrio.JobToRole(m.Job);
+                    return r == AutomarkerPrio.PrioRoleEnum.Melee || r == AutomarkerPrio.PrioRoleEnum.Ranged || r == AutomarkerPrio.PrioRoleEnum.Caster;
+                });
+                if (healer == null || dps == null || healer == dps)
+                {
+                    healer = members[0];
+                    dps = members.Count > 1 ? members[1] : members[0];
+                }
+                _accretion.Add((uint)healer.ObjectId);
+                _first.Add((uint)healer.ObjectId);
+                _accretion.Add((uint)dps.ObjectId);
+                _second.Add((uint)dps.ObjectId);
+                PlaceMarkers();
+            }
+
+        }
+
+        #endregion
+
         public UltDancingMad(State st) : base(st)
         {
             st.OnZoneChange += OnZoneChange;
@@ -745,6 +964,7 @@ namespace DancingMadness.Content
                 _state.OnCastBegin += OnCastBegin;
                 _state.OnAction += OnAction;
                 _state.OnHeadMarker += OnHeadMarker;
+                _state.OnStatusChange += OnStatusChange;
             }
         }
 
@@ -758,6 +978,7 @@ namespace DancingMadness.Content
                 }
                 Log(LogLevelEnum.Debug, null, "Unsubscribing from events");
                 _state.OnHeadMarker -= OnHeadMarker;
+                _state.OnStatusChange -= OnStatusChange;
                 _state.OnAction -= OnAction;
                 _state.OnCastBegin -= OnCastBegin;
                 _subbed = false;
@@ -787,6 +1008,17 @@ namespace DancingMadness.Content
             _forsakenAm.FeedHeadmarker(dest, markerId);
         }
 
+        private void OnStatusChange(uint src, uint dest, uint statusId, bool gained, float duration, int stacks)
+        {
+            if (statusId == EarthquakeAM.StatusAccretion
+                || statusId == EarthquakeAM.StatusFirstInLine
+                || statusId == EarthquakeAM.StatusSecondInLine)
+            {
+                Log(LogLevelEnum.Info, null, "[Earthquake] status 0x{0:X} {1} on actor 0x{2:X}", statusId, gained == true ? "gained" : "lost", dest);
+                _earthquakeAm.FeedStatus(dest, statusId, gained);
+            }
+        }
+
         private void OnCombatChange(bool inCombat)
         {
             Reset();
@@ -807,6 +1039,7 @@ namespace DancingMadness.Content
             {
                 Log(State.LogLevelEnum.Info, null, "Content available");
                 _forsakenAm = (ForsakenAM)Items["ForsakenAM"];
+                _earthquakeAm = (EarthquakeAM)Items["EarthquakeAM"];
                 _state.OnCombatChange += OnCombatChange;
                 LogItems();
             }
