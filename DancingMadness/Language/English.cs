@@ -1554,6 +1554,19 @@ namespace DancingMadness.Language
             AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Timing", "Marker timing");
             AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Simulate", "Simulate (debug): need a party in a duty. Marks a healer (Chain 1) and a DPS (Chain 2) as if Accretion just resolved.");
             AddEntry("Content/Ultimate/UltDancingMad/EarthquakeAM/Simulate/Earthquake", "Simulate Earthquake");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM", "Kefka Says spreads");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Enabled", "Enabled");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/SelfMarkOnly", "Self-marking only");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/AsSoftmarker", "Show as client-side soft markers");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Signs", "Marker configuration");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Signs/Ignore1", "Ignore 1 (long timer, support)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Signs/Ignore2", "Ignore 2 (long timer, DPS)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Signs/Chain1", "Chain 1 (short timer, support)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Signs/Chain2", "Chain 2 (short timer, DPS)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Prio", "Priority configuration (support takes slot 1)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Timing", "Marker timing");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Simulate", "Simulate (debug): need a party in a duty. Marks two supports and two DPS (Ignore = long timer, Chain = short timer).");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Simulate/KefkaSays", "Simulate Kefka Says");
             #endregion
             #region RSV abilities
             AddEntry("RSV/Ability_33127", "Front Combination");

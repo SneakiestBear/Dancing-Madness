@@ -27,6 +27,7 @@ namespace DancingMadness.Content
 
         private ForsakenAM _forsakenAm;
         private EarthquakeAM _earthquakeAm;
+        private KefkaSaysAM _kefkaSaysAm;
 
         #region ForsakenAM
 
@@ -938,6 +939,301 @@ namespace DancingMadness.Content
 
         #endregion
 
+        #region KefkaSaysAM
+
+        // "Kefka Says" spreads. All 8 players get Forked Lightning or Compressed Water; which
+        // element is the threat is told by Neo Exdeath's real/fake indicator (status 0x808:
+        // param 462 = real -> mark lightning, 461 = fake -> mark water), set per Grand Cross.
+        // Spreads happen on the first two Grand Crosses only, in two separate sets ~15s apart.
+        // Each set is marked when its debuffs land, using the indicator active at that moment
+        // and the debuff's timer at application (>55s -> Ignore, else Chain), support = slot 1,
+        // DPS = slot 2. This handles mixed / double-real / double-fake. Marks are added
+        // progressively (the second set doesn't clear the first) and each clears when that
+        // player's debuff expires.
+        public class KefkaSaysAM : Automarker
+        {
+
+            [AttributeOrderNumber(1000)]
+            public AutomarkerSigns Signs { get; set; }
+
+            [AttributeOrderNumber(2000)]
+            public AutomarkerPrio Prio { get; set; }
+
+            public class SimulatorWidget : CustomPropertyInterface
+            {
+
+                private KefkaSaysAM _am;
+
+                public SimulatorWidget(KefkaSaysAM am)
+                {
+                    _am = am;
+                }
+
+                public override string Serialize()
+                {
+                    return "";
+                }
+
+                public override void Deserialize(string data)
+                {
+                }
+
+                public override void RenderEditor(string path)
+                {
+                    ImGui.TextWrapped(I18n.Translate(path));
+                    if (ImGui.Button(I18n.Translate(path + "/KefkaSays") + "##simkefka") == true)
+                    {
+                        _am.SimKefkaSays();
+                    }
+                }
+
+            }
+
+            [DebugOption]
+            [AttributeOrderNumber(2200)]
+            public SimulatorWidget Simulate { get; set; }
+
+            [DebugOption]
+            [AttributeOrderNumber(2500)]
+            public AutomarkerTiming Timing { get; set; }
+
+            // The two element debuffs (land on all 8 players). The threat element is told by
+            // the indicator below, not by the debuff itself.
+            internal const uint StatusForkedLightning = 0x15A8;
+            internal const uint StatusCompressedWater = 0x15A9;
+            // Indicator on Neo Exdeath shown for each Grand Cross. param 462 = real (mark the
+            // lightning players), 461 = fake (mark the water players).
+            internal const uint StatusRealFakeIndicator = 0x808;
+            private const int ParamReal = 462;
+
+            // >55s left when the debuff lands = Ignore (spread), otherwise Chain. Captured at
+            // application because the timer counts down (a later read could misclassify).
+            private const double IgnoreThresholdSeconds = 55.0;
+            private const double StatusDebounceSeconds = 0.5;
+
+            private static readonly string[] IgnoreRoles = new string[] { "Ignore1", "Ignore2" };
+            private static readonly string[] ChainRoles = new string[] { "Chain1", "Chain2" };
+
+            // Latest indicator (true = real -> lightning). _setReal locks it when a fresh set
+            // of debuffs starts landing, so each progressive set uses its own Grand Cross.
+            private bool _currentReal = false;
+            private bool _setReal = false;
+            // The current set's debuffs: actor -> element id, and actor -> remaining duration.
+            private Dictionary<uint, uint> _pendElem = new Dictionary<uint, uint>();
+            private Dictionary<uint, float> _pendDur = new Dictionary<uint, float>();
+            private HashSet<uint> _marked = new HashSet<uint>();
+            private bool _pending = false;
+            private DateTime _lastStatus = DateTime.MinValue;
+
+            public static bool IsMarkable(uint statusId)
+            {
+                return statusId == StatusForkedLightning || statusId == StatusCompressedWater;
+            }
+
+            public KefkaSaysAM(State state) : base(state)
+            {
+                Signs = new AutomarkerSigns();
+                Signs.SetRole("Ignore1", AutomarkerSigns.SignEnum.Ignore1, false);
+                Signs.SetRole("Ignore2", AutomarkerSigns.SignEnum.Ignore2, false);
+                Signs.SetRole("Chain1", AutomarkerSigns.SignEnum.Bind1, false);
+                Signs.SetRole("Chain2", AutomarkerSigns.SignEnum.Bind2, false);
+                // Support (tank/healer) first, so it takes slot 1 and the DPS slot 2.
+                Prio = new AutomarkerPrio();
+                Prio.Priority = AutomarkerPrio.PrioTypeEnum.Role;
+                Prio._prioByRole.Clear();
+                Prio._prioByRole.Add(AutomarkerPrio.PrioRoleEnum.Tank);
+                Prio._prioByRole.Add(AutomarkerPrio.PrioRoleEnum.Healer);
+                Prio._prioByRole.Add(AutomarkerPrio.PrioRoleEnum.Melee);
+                Prio._prioByRole.Add(AutomarkerPrio.PrioRoleEnum.Ranged);
+                Prio._prioByRole.Add(AutomarkerPrio.PrioRoleEnum.Caster);
+                Simulate = new SimulatorWidget(this);
+                Timing = new AutomarkerTiming()
+                {
+                    TimingType = AutomarkerTiming.TimingTypeEnum.Explicit,
+                    IniDelayMin = 0.1f,
+                    IniDelayMax = 0.2f,
+                    SubDelayMin = 0.1f,
+                    SubDelayMax = 0.15f,
+                };
+            }
+
+            public override void Reset()
+            {
+                _pendElem.Clear();
+                _pendDur.Clear();
+                _marked.Clear();
+                _pending = false;
+                _currentReal = false;
+                _setReal = false;
+                _state.ClearAutoMarkers();
+            }
+
+            // Neo Exdeath's real/fake indicator for the upcoming Grand Cross.
+            public void SetRealFake(int param)
+            {
+                if (Active == false)
+                {
+                    return;
+                }
+                _currentReal = (param == ParamReal);
+            }
+
+            // The parent forwards gains/losses of the two element debuffs. We buffer one "set"
+            // (a burst) and place it once it settles, using the indicator captured when the
+            // set started landing.
+            public void FeedStatus(uint actorId, uint statusId, bool gained, float duration)
+            {
+                if (Active == false)
+                {
+                    return;
+                }
+                if (gained == false)
+                {
+                    // Debuff expired/resolved -> clear just that player's mark.
+                    if (_marked.Contains(actorId) == true)
+                    {
+                        ClearOne(actorId);
+                    }
+                    return;
+                }
+                if (statusId != StatusForkedLightning && statusId != StatusCompressedWater)
+                {
+                    return;
+                }
+                if (_pendElem.Count == 0)
+                {
+                    // New set -> lock in which element is the threat for it.
+                    _setReal = _currentReal;
+                }
+                _pendElem[actorId] = statusId;
+                _pendDur[actorId] = duration;
+                _lastStatus = DateTime.Now;
+                _pending = true;
+            }
+
+            private void ClearOne(uint actorId)
+            {
+                Party.PartyMember pm = _state.GetPartyMembers().GetByActorId(actorId);
+                if (pm != null && pm.GameObject != null)
+                {
+                    _state.ClearMarkerOn(pm.GameObject, true, true);
+                }
+                _marked.Remove(actorId);
+            }
+
+            protected override bool ExecutionImplementation()
+            {
+                if (_pending == true && (DateTime.Now - _lastStatus).TotalSeconds >= StatusDebounceSeconds)
+                {
+                    _pending = false;
+                    PlaceSet();
+                }
+                return true;
+            }
+
+            private void PlaceSet()
+            {
+                if (_pendElem.Count == 0)
+                {
+                    return;
+                }
+                // Real -> the lightning players of this set are the threat; fake -> the water
+                // players. Their timer decides Ignore (long) vs Chain (short).
+                uint markElem = _setReal == true ? StatusForkedLightning : StatusCompressedWater;
+                List<uint> ignore = new List<uint>();
+                List<uint> chain = new List<uint>();
+                foreach (KeyValuePair<uint, uint> kp in _pendElem)
+                {
+                    if (kp.Value != markElem)
+                    {
+                        continue;
+                    }
+                    if (_pendDur.TryGetValue(kp.Key, out float dur) == true && dur > IgnoreThresholdSeconds)
+                    {
+                        ignore.Add(kp.Key);
+                    }
+                    else
+                    {
+                        chain.Add(kp.Key);
+                    }
+                }
+                _pendElem.Clear();
+                _pendDur.Clear();
+                if (ignore.Count == 0 && chain.Count == 0)
+                {
+                    return;
+                }
+                Party pty = _state.GetPartyMembers();
+                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                // Progressive: add this set's marks without clearing the previous set's.
+                AssignCategory(ap, pty, ignore, IgnoreRoles);
+                AssignCategory(ap, pty, chain, ChainRoles);
+                _state.ExecuteAutomarkers(ap, Timing);
+            }
+
+            private void AssignCategory(AutomarkerPayload ap, Party pty, List<uint> ids, string[] roles)
+            {
+                List<Party.PartyMember> members = pty.GetByActorIds(ids);
+                Prio.SortByPriority(members);
+                for (int i = 0; i < members.Count && i < roles.Length; i++)
+                {
+                    ap.Assign(Signs.Roles[roles[i]], members[i].GameObject);
+                    _marked.Add((uint)members[i].ObjectId);
+                }
+            }
+
+            // Debug: mark two supports and two DPS as if Kefka Says just went out -- one
+            // support+DPS pair on a long timer (Ignore 1/2), the other pair short (Chain 1/2).
+            public void SimKefkaSays()
+            {
+                if (Active == false)
+                {
+                    return;
+                }
+                Party pty = _state.GetPartyMembers();
+                List<Party.PartyMember> members = (from m in pty.Members where m.GameObject != null orderby m.Index select m).ToList();
+                if (members.Count == 0)
+                {
+                    return;
+                }
+                Reset();
+                List<Party.PartyMember> supports = members.Where(m =>
+                {
+                    AutomarkerPrio.PrioRoleEnum r = AutomarkerPrio.JobToRole(m.Job);
+                    return r == AutomarkerPrio.PrioRoleEnum.Tank || r == AutomarkerPrio.PrioRoleEnum.Healer;
+                }).ToList();
+                List<Party.PartyMember> dps = members.Where(m =>
+                {
+                    AutomarkerPrio.PrioRoleEnum r = AutomarkerPrio.JobToRole(m.Job);
+                    return r == AutomarkerPrio.PrioRoleEnum.Melee || r == AutomarkerPrio.PrioRoleEnum.Ranged || r == AutomarkerPrio.PrioRoleEnum.Caster;
+                }).ToList();
+                List<uint> ignore = new List<uint>();
+                List<uint> chain = new List<uint>();
+                if (supports.Count >= 2 && dps.Count >= 2)
+                {
+                    ignore.Add((uint)supports[0].ObjectId);
+                    ignore.Add((uint)dps[0].ObjectId);
+                    chain.Add((uint)supports[1].ObjectId);
+                    chain.Add((uint)dps[1].ObjectId);
+                }
+                else
+                {
+                    for (int i = 0; i < members.Count && i < 4; i++)
+                    {
+                        if (i < 2) { ignore.Add((uint)members[i].ObjectId); }
+                        else { chain.Add((uint)members[i].ObjectId); }
+                    }
+                }
+                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                AssignCategory(ap, pty, ignore, IgnoreRoles);
+                AssignCategory(ap, pty, chain, ChainRoles);
+                _state.ExecuteAutomarkers(ap, Timing);
+            }
+
+        }
+
+        #endregion
+
         public UltDancingMad(State st) : base(st)
         {
             st.OnZoneChange += OnZoneChange;
@@ -1017,6 +1313,19 @@ namespace DancingMadness.Content
                 Log(LogLevelEnum.Info, null, "[Earthquake] status 0x{0:X} {1} on actor 0x{2:X}", statusId, gained == true ? "gained" : "lost", dest);
                 _earthquakeAm.FeedStatus(dest, statusId, gained);
             }
+            if (statusId == KefkaSaysAM.StatusRealFakeIndicator && dest >= 0x40000000)
+            {
+                Log(LogLevelEnum.Info, null, "[KefkaSays] real/fake indicator param={0} {1} on 0x{2:X}", stacks, gained == true ? "on" : "off", dest);
+                if (gained == true)
+                {
+                    _kefkaSaysAm.SetRealFake(stacks);
+                }
+            }
+            if (KefkaSaysAM.IsMarkable(statusId) == true)
+            {
+                Log(LogLevelEnum.Info, null, "[KefkaSays] debuff 0x{0:X} {1} ({2:0}s) on actor 0x{3:X}", statusId, gained == true ? "gained" : "lost", duration, dest);
+                _kefkaSaysAm.FeedStatus(dest, statusId, gained, duration);
+            }
         }
 
         private void OnCombatChange(bool inCombat)
@@ -1040,6 +1349,7 @@ namespace DancingMadness.Content
                 Log(State.LogLevelEnum.Info, null, "Content available");
                 _forsakenAm = (ForsakenAM)Items["ForsakenAM"];
                 _earthquakeAm = (EarthquakeAM)Items["EarthquakeAM"];
+                _kefkaSaysAm = (KefkaSaysAM)Items["KefkaSaysAM"];
                 _state.OnCombatChange += OnCombatChange;
                 LogItems();
             }
