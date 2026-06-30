@@ -1002,9 +1002,12 @@ namespace DancingMadness.Content
             internal const uint StatusForkedLightning = 0x15A8;
             internal const uint StatusCompressedWater = 0x15A9;
             // Indicator on Neo Exdeath shown for each Grand Cross. param 462 = real (mark the
-            // lightning players), 461 = fake (mark the water players).
+            // lightning players), 461 = fake (mark the water players). NOTE: other bosses
+            // (e.g. Chaos) also carry status 0x808 with different params, so we only act on
+            // these two specific values.
             internal const uint StatusRealFakeIndicator = 0x808;
             private const int ParamReal = 462;
+            private const int ParamFake = 461;
 
             // >55s left when the debuff lands = Ignore (spread), otherwise Chain. Captured at
             // application because the timer counts down (a later read could misclassify).
@@ -1068,14 +1071,23 @@ namespace DancingMadness.Content
                 _state.ClearAutoMarkers();
             }
 
-            // Neo Exdeath's real/fake indicator for the upcoming Grand Cross.
+            // Neo Exdeath's real/fake indicator for the upcoming Grand Cross. Only the two
+            // specific param values are this indicator; ignore any other 0x808 (e.g. Chaos's)
+            // so it can't flip the real/fake state.
             public void SetRealFake(int param)
             {
                 if (Active == false)
                 {
                     return;
                 }
-                _currentReal = (param == ParamReal);
+                if (param == ParamReal)
+                {
+                    _currentReal = true;
+                }
+                else if (param == ParamFake)
+                {
+                    _currentReal = false;
+                }
             }
 
             // The parent forwards gains/losses of the two element debuffs. We buffer one "set"
@@ -1315,8 +1327,13 @@ namespace DancingMadness.Content
             }
             if (statusId == KefkaSaysAM.StatusRealFakeIndicator && dest >= 0x40000000)
             {
-                Log(LogLevelEnum.Info, null, "[KefkaSays] real/fake indicator param={0} {1} on 0x{2:X}", stacks, gained == true ? "on" : "off", dest);
-                if (gained == true)
+                // Kefka, Neo Exdeath and Chaos all carry 0x808, but only Neo Exdeath's
+                // indicator drives the Grand Cross spreads -- match it by name (SetRealFake
+                // also guards on the 461/462 values as a backstop).
+                var go = _state.GetActorById(dest);
+                string nm = go != null ? go.Name.ToString() : "";
+                Log(LogLevelEnum.Info, null, "[KefkaSays] indicator param={0} {1} on '{2}' (0x{3:X})", stacks, gained == true ? "on" : "off", nm, dest);
+                if (gained == true && nm == "Neo Exdeath")
                 {
                     _kefkaSaysAm.SetRealFake(stacks);
                 }
