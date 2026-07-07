@@ -943,7 +943,7 @@ namespace DancingMadness.Content
 
         // "Kefka Says" spreads. All 8 players get Forked Lightning or Compressed Water; which
         // element is the threat is told by Neo Exdeath's real/fake indicator (status 0x808:
-        // param 462 = real -> mark lightning, 461 = fake -> mark water), set per Grand Cross.
+        // param 0x462 = real -> mark lightning, 0x461 = fake -> mark water), set per Grand Cross.
         // Spreads happen on the first two Grand Crosses only, in two separate sets ~15s apart.
         // Each set is marked when its debuffs land, using the indicator active at that moment
         // and the debuff's timer at application (>55s -> Ignore, else Chain), support = slot 1,
@@ -1001,13 +1001,17 @@ namespace DancingMadness.Content
             // the indicator below, not by the debuff itself.
             internal const uint StatusForkedLightning = 0x15A8;
             internal const uint StatusCompressedWater = 0x15A9;
-            // Indicator on Neo Exdeath shown for each Grand Cross. param 462 = real (mark the
-            // lightning players), 461 = fake (mark the water players). NOTE: other bosses
+            // Indicator on Neo Exdeath shown for each Grand Cross. param 0x462 = real (mark the
+            // lightning players), 0x461 = fake (mark the water players). NOTE: other bosses
             // (e.g. Chaos) also carry status 0x808 with different params, so we only act on
             // these two specific values.
             internal const uint StatusRealFakeIndicator = 0x808;
-            private const int ParamReal = 462;
-            private const int ParamFake = 461;
+            // Param/stacks values are HEX (ACT logs them in hex; e.g. Chaos shows "45F").
+            // The packet delivers the raw ushort, so these MUST be 0x462/0x461 (1122/1121),
+            // not decimal 462/461 -- otherwise SetRealFake never matches and every set
+            // defaults to marking the water players.
+            private const int ParamReal = 0x462;
+            private const int ParamFake = 0x461;
 
             // >55s left when the debuff lands = Ignore (spread), otherwise Chain. Captured at
             // application because the timer counts down (a later read could misclassify).
