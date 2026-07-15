@@ -1567,6 +1567,22 @@ namespace DancingMadness.Language
             AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Timing", "Marker timing");
             AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Simulate", "Simulate (debug): need a party in a duty. Marks two supports and two DPS (Ignore = long timer, Chain = short timer).");
             AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysAM/Simulate/KefkaSays", "Simulate Kefka Says");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM", "Kefka Says progressive (experimental)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Enabled", "Enabled");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/SelfMarkOnly", "Self-marking only");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/AsSoftmarker", "Show as client-side soft markers");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs1", "Spread markers");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs1/Forked1", "Spread 1");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs1/Forked2", "Spread 2");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs2", "Gaze markers");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs2/LookAt1", "Look toward 1");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs2/LookAt2", "Look toward 2");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs2/LookAway1", "Look away 1");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs2/LookAway2", "Look away 2");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs3", "Boss (Chaos) markers");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs3/Donut", "Donut (stay in)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Signs3/Tornado", "Tornado / point-blank (stay out)");
+            AddEntry("Content/Ultimate/UltDancingMad/KefkaSaysProgressiveAM/Timing", "Marker timing");
             #endregion
             #region RSV abilities
             AddEntry("RSV/Ability_33127", "Front Combination");

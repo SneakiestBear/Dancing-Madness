@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.ClientState.Objects.Types;
 using static DancingMadness.Core.State;
 
 namespace DancingMadness.Content
@@ -22,12 +23,24 @@ namespace DancingMadness.Content
         // which drives which group (per the order string) is currently shown.
         private const int AbilityPathOfLight = 0xBABE;
 
+        // (P4) casts that drive the progressive Kefka Says sequence. Decimal to match the
+        // reverse-engineered values exactly (hex in comments).
+        private const int AbilityKefkaSays = 49884;       // 0xC2DC -- phase start
+        private const int AbilityFloodOfNaught1 = 50066;  // 0xC392
+        private const int AbilityFloodOfNaught2 = 50067;  // 0xC393
+        private const int AbilityFloodOfNaught3 = 50081;  // 0xC3A1
+        private const int AbilityFloodOfNaught4 = 50082;  // 0xC3A2
+        private const int AbilityUltimaUpsurge = 49738;   // 0xC24A
+        private const int AbilityManaRelease = 47781;     // 0xBAA5
+        private const int AbilityBlizzardBlowout = 47765; // 0xBA95
+
         private bool ZoneOk = false;
         private bool _subbed = false;
 
         private ForsakenAM _forsakenAm;
         private EarthquakeAM _earthquakeAm;
         private KefkaSaysAM _kefkaSaysAm;
+        private KefkaSaysProgressiveAM _kefkaSaysProgressiveAm;
 
         #region ForsakenAM
 
@@ -1250,6 +1263,473 @@ namespace DancingMadness.Content
 
         #endregion
 
+        #region KefkaSaysProgressiveAM
+
+        // (P4) Kefka Says -- PROGRESSIVE variant. Instead of one spread resolve, it walks the
+        // whole add-phase sequence and only ever shows what's needed for the *next* mechanic,
+        // swapping as each step resolves. This is a SEPARATE automarker from "Kefka Says
+        // spreads": disabled by default and toggled independently, so only one is ever active.
+        // Ported from an upstream Lemegeton attempt; adapted to this fork (marking deferred to
+        // the poll thread via a render queue, bounds-guarded, and the double-mark bug removed).
+        public class KefkaSaysProgressiveAM : Automarker
+        {
+
+            // Neo Exdeath element spreads. Which one means "you spread" flips with the real/fake
+            // indicator: real -> Forked Lightning holders spread; fake -> Compressed Water do.
+            private const uint StatusForkedLightning = 5544;   // 0x15A8
+            private const uint StatusCompressedWater = 5545;   // 0x15A9
+            private const uint StatusCursedShriek = 5543;      // 0x15A7 (gaze: look toward / away)
+            private const uint StatusDynamicFluid = 5548;      // 0x15AC (Chaos: real donut / fake tornado)
+            private const uint StatusEntropy = 5547;           // 0x15AB (Chaos: real tornado / fake donut)
+            private const uint StatusThunderCharged = 1485;    // 0x5CD  (tags the boss for donut/tornado)
+
+            // Real/fake indicator (status 0x808). Routed by boss name (see FeedRealFake), so
+            // these params only distinguish real vs fake within one boss. Neo Exdeath uses both
+            // exact values (0x462/0x461, confirmed). Chaos only needs its confirmed fake value
+            // (0x45F) -- anything else on Chaos is treated as real, so 0x460 isn't relied upon.
+            public const uint StatusRealFakeIndicator = 2056; // 0x808
+            private const int ExdeathReal = 1122;             // 0x462
+            private const int ExdeathFake = 1121;             // 0x461
+            private const int ChaosFake = 1119;               // 0x45F
+
+            // Which forwarded statuses this AM consumes (indicator handled separately).
+            public static bool Handles(uint statusId)
+            {
+                return statusId == StatusForkedLightning
+                    || statusId == StatusCompressedWater
+                    || statusId == StatusCursedShriek
+                    || statusId == StatusDynamicFluid
+                    || statusId == StatusEntropy
+                    || statusId == StatusThunderCharged;
+            }
+
+            [AttributeOrderNumber(1000)]
+            public AutomarkerSigns Signs1 { get; set; }   // spreads
+
+            [AttributeOrderNumber(1100)]
+            public AutomarkerSigns Signs2 { get; set; }   // gazes
+
+            [AttributeOrderNumber(1200)]
+            public AutomarkerSigns Signs3 { get; set; }   // boss donut / tornado
+
+            [DebugOption]
+            [AttributeOrderNumber(2500)]
+            public AutomarkerTiming Timing { get; set; }
+
+            private bool _exdeathReal = true;
+            private bool _chaosReal = true;
+            private bool _armed = false;
+            private bool _placed = false;
+
+            // Spread/gaze holders carry a resolve time so the early vs late set can pick the
+            // right pair (ascending = this resolve, descending = the following one).
+            private List<Tuple<IGameObject, DateTime>> _spreads = new List<Tuple<IGameObject, DateTime>>();
+            private List<Tuple<IGameObject, DateTime, bool>> _gazes = new List<Tuple<IGameObject, DateTime, bool>>();
+
+            // Gazes are marked when their Cursed Shriek debuff drops to this many seconds
+            // remaining -- a few seconds ahead of the Thunder Charged / Blizzard III Blowout
+            // casts that gate the boss donut, so players get the look call earlier. The casts
+            // stay wired as a fallback; _gazesMarked keeps either path from double-placing.
+            private const double GazeLeadSeconds = 8.0;
+            private readonly HashSet<IGameObject> _gazesMarked = new HashSet<IGameObject>();
+            private List<Tuple<bool, DateTime>> _fireWater = new List<Tuple<bool, DateTime>>();
+            private IGameObject _kefker = null;
+
+            // The set switch runs on the network thread; marking must happen on the poll thread,
+            // so transitions are queued and drained in ExecutionImplementation (in order).
+            private readonly object _renderLock = new object();
+            private Queue<int> _renderQueue = new Queue<int>();
+
+            private int _currentSet = 0;
+            private int CurrentSet
+            {
+                get { return _currentSet; }
+                set
+                {
+                    if (_currentSet != value)
+                    {
+                        _currentSet = value;
+                        Log(State.LogLevelEnum.Debug, null, "[KefkaProgressive] set -> {0}", _currentSet);
+                        lock (_renderLock) { _renderQueue.Enqueue(_currentSet); }
+                    }
+                }
+            }
+
+            public KefkaSaysProgressiveAM(State state) : base(state)
+            {
+                // Off by default so it never fights "Kefka Says spreads" -- the user turns on
+                // whichever one they want.
+                Enabled = false;
+                Signs1 = new AutomarkerSigns();
+                Signs2 = new AutomarkerSigns();
+                Signs3 = new AutomarkerSigns();
+                Signs1.SetRole("Forked1", AutomarkerSigns.SignEnum.Ignore1, false);
+                Signs1.SetRole("Forked2", AutomarkerSigns.SignEnum.Ignore2, false);
+                Signs2.SetRole("LookAt1", AutomarkerSigns.SignEnum.Bind1, false);
+                Signs2.SetRole("LookAt2", AutomarkerSigns.SignEnum.Bind2, false);
+                Signs2.SetRole("LookAway1", AutomarkerSigns.SignEnum.Ignore1, false);
+                Signs2.SetRole("LookAway2", AutomarkerSigns.SignEnum.Ignore2, false);
+                Signs3.SetRole("Donut", AutomarkerSigns.SignEnum.Circle, false);
+                Signs3.SetRole("Tornado", AutomarkerSigns.SignEnum.Plus, false);
+                Timing = new AutomarkerTiming()
+                {
+                    TimingType = AutomarkerTiming.TimingTypeEnum.Explicit,
+                    IniDelayMin = 0.1f,
+                    IniDelayMax = 0.2f,
+                    SubDelayMin = 0.1f,
+                    SubDelayMax = 0.15f,
+                };
+            }
+
+            public override void Reset()
+            {
+                _armed = false;
+                _exdeathReal = true;
+                _chaosReal = true;
+                _spreads.Clear();
+                _gazes.Clear();
+                _gazesMarked.Clear();
+                _fireWater.Clear();
+                _kefker = null;
+                _currentSet = 0;
+                lock (_renderLock) { _renderQueue.Clear(); }
+                if (_placed == true)
+                {
+                    _placed = false;
+                    _state.ClearAutoMarkers();
+                }
+            }
+
+            // Kefka Says cast opens the phase: arm from a clean slate.
+            public void Arm()
+            {
+                if (Active == false)
+                {
+                    return;
+                }
+                Reset();
+                _armed = true;
+                Log(State.LogLevelEnum.Debug, null, "[KefkaProgressive] armed");
+            }
+
+            // Real/fake indicator (0x808). Routed by boss name (like "Kefka Says spreads"), so
+            // Kefka's own 0x808 can't corrupt either flag. Neo Exdeath keeps the proven exact-
+            // param check (0x462/0x461); Chaos treats anything that isn't the confirmed fake
+            // value (0x45F) as real, so it doesn't depend on 0x460 being exactly right.
+            public void FeedRealFake(string bossName, int param)
+            {
+                if (Active == false)
+                {
+                    return;
+                }
+                if (bossName == "Neo Exdeath")
+                {
+                    if (param == ExdeathReal) { _exdeathReal = true; }
+                    else if (param == ExdeathFake) { _exdeathReal = false; }
+                }
+                else if (bossName == "Chaos")
+                {
+                    _chaosReal = param != ChaosFake;
+                }
+            }
+
+            public void FeedStatus(uint dest, uint statusId, float duration, bool gained)
+            {
+                if (Active == false || _armed == false)
+                {
+                    return;
+                }
+                IGameObject de = _state.GetActorById(dest);
+                switch (statusId)
+                {
+                    case StatusForkedLightning:
+                        if (gained == true)
+                        {
+                            if (_exdeathReal == true && de != null)
+                            {
+                                _spreads.Add(new Tuple<IGameObject, DateTime>(de, DateTime.Now.AddSeconds(duration)));
+                            }
+                        }
+                        else if (_currentSet == 1 || _currentSet == 7)
+                        {
+                            AdvanceSet();
+                        }
+                        break;
+                    case StatusCompressedWater:
+                        if (gained == true && _exdeathReal == false && de != null)
+                        {
+                            _spreads.Add(new Tuple<IGameObject, DateTime>(de, DateTime.Now.AddSeconds(duration)));
+                        }
+                        break;
+                    case StatusDynamicFluid:
+                        if (gained == true)
+                        {
+                            _fireWater.Add(new Tuple<bool, DateTime>(_chaosReal, DateTime.Now.AddSeconds(duration)));
+                        }
+                        break;
+                    case StatusEntropy:
+                        if (gained == true)
+                        {
+                            _fireWater.Add(new Tuple<bool, DateTime>(_chaosReal == false, DateTime.Now.AddSeconds(duration)));
+                        }
+                        break;
+                    case StatusCursedShriek:
+                        if (gained == true)
+                        {
+                            if (de != null)
+                            {
+                                _gazes.Add(new Tuple<IGameObject, DateTime, bool>(de, DateTime.Now.AddSeconds(duration), _exdeathReal));
+                            }
+                        }
+                        else if (_currentSet == 3 || _currentSet == 10)
+                        {
+                            AdvanceSet();
+                        }
+                        break;
+                    case StatusThunderCharged:
+                        if (gained == true)
+                        {
+                            _kefker = de;
+                            AdvanceSet();
+                        }
+                        break;
+                }
+            }
+
+            // A phase cast (Flood of Naught / Ultima Upsurge begin / Mana Release / Blizzard
+            // Blowout) steps the sequence forward once.
+            public void AdvanceOnCast()
+            {
+                if (Active == false || _armed == false)
+                {
+                    return;
+                }
+                AdvanceSet();
+            }
+
+            // Ultima Upsurge actually landing advances the mid-phase step (set 5 -> 6).
+            public void AdvanceOnUpsurgeHit()
+            {
+                if (Active == false || _armed == false)
+                {
+                    return;
+                }
+                if (_currentSet == 5)
+                {
+                    AdvanceSet();
+                }
+            }
+
+            private void AdvanceSet()
+            {
+                CurrentSet = _currentSet + 1;
+            }
+
+            protected override bool ExecutionImplementation()
+            {
+                CheckGazeTimers();
+                List<int> todo = null;
+                lock (_renderLock)
+                {
+                    if (_renderQueue.Count > 0)
+                    {
+                        todo = new List<int>(_renderQueue);
+                        _renderQueue.Clear();
+                    }
+                }
+                if (todo != null)
+                {
+                    foreach (int set in todo)
+                    {
+                        PerformMarking(set);
+                    }
+                }
+                return true;
+            }
+
+            // Poll thread: place a gaze pair once its debuff drops to GazeLeadSeconds
+            // remaining, ahead of the boss cast that would otherwise trigger it. Runs every
+            // frame; PlaceGazes records the pair so the cast fallback won't place it again.
+            private void CheckGazeTimers()
+            {
+                if (Active == false || _armed == false)
+                {
+                    return;
+                }
+                DateTime now = DateTime.Now;
+                List<Tuple<IGameObject, DateTime, bool>> due =
+                    (from ix in _gazes
+                     let remaining = (ix.Item2 - now).TotalSeconds
+                     where _gazesMarked.Contains(ix.Item1) == false
+                        && remaining > 0
+                        && remaining <= GazeLeadSeconds
+                     orderby ix.Item2 ascending
+                     select ix).Take(2).ToList();
+                if (due.Count >= 2)
+                {
+                    PlaceGazes(due);
+                }
+            }
+
+            // A resolve step (case 2/4/8/10) wipes every party marker globally. If a gaze was
+            // placed early and hasn't gone off yet, forget that we marked it so CheckGazeTimers
+            // re-places it next frame. The 1s margin keeps a gaze that just resolved (remaining
+            // ~0) from being re-armed as a ghost.
+            private void RearmPendingGazes()
+            {
+                DateTime now = DateTime.Now;
+                _gazesMarked.RemoveWhere(go =>
+                    _gazes.Any(g => ReferenceEquals(g.Item1, go) == true
+                        && (g.Item2 - now).TotalSeconds > 1.0));
+            }
+
+            private void PerformMarking(int set)
+            {
+                Party pty = _state.GetPartyMembers();
+                switch (set)
+                {
+                    case 1: // early spreads (Flood of Naught)
+                        {
+                            List<IGameObject> spreads = (from ix in _spreads orderby ix.Item2 ascending select ix.Item1).Take(2).ToList();
+                            PlaceSpreads(pty, spreads);
+                        }
+                        break;
+                    case 3: // early gaze (Thunder Charged)
+                        {
+                            List<Tuple<IGameObject, DateTime, bool>> gazes = (from ix in _gazes orderby ix.Item2 ascending select ix).Take(2).ToList();
+                            PlaceGazes(gazes);
+                        }
+                        break;
+                    case 5: // boss donut/tornado + late spreads (Ultima Upsurge begin)
+                        {
+                            AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                            List<Tuple<bool, DateTime>> fw = (from ix in _fireWater orderby ix.Item2 ascending select ix).Take(1).ToList();
+                            if (_kefker != null && fw.Count >= 1)
+                            {
+                                ap.Assign(fw[0].Item1 == true ? Signs3.Roles["Donut"] : Signs3.Roles["Tornado"], _kefker);
+                            }
+                            List<IGameObject> spreads = (from ix in _spreads orderby ix.Item2 descending select ix.Item1).Take(2).ToList();
+                            if (AssignSpreads(ap, spreads) == true || _kefker != null)
+                            {
+                                _state.ExecuteAutomarkers(ap, Timing);
+                                _placed = true;
+                            }
+                        }
+                        break;
+                    case 7: // late spreads resolve -> drop only the boss marker
+                        if (_kefker != null)
+                        {
+                            bool soft = _state.cfg.AutomarkerSoft == true || AsSoftmarker;
+                            _state.ClearMarkerOn(_kefker, soft == false, soft);
+                        }
+                        break;
+                    case 9: // late gaze (Blizzard III Blowout)
+                        {
+                            List<Tuple<IGameObject, DateTime, bool>> gazes = (from ix in _gazes orderby ix.Item2 descending select ix).Take(2).ToList();
+                            PlaceGazes(gazes);
+                        }
+                        break;
+                    case 11: // late boss donut/tornado (Cursed Shriek resolve)
+                        if (_kefker != null)
+                        {
+                            List<Tuple<bool, DateTime>> fw = (from ix in _fireWater orderby ix.Item2 descending select ix).Take(1).ToList();
+                            if (fw.Count >= 1)
+                            {
+                                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                                ap.Assign(fw[0].Item1 == true ? Signs3.Roles["Donut"] : Signs3.Roles["Tornado"], _kefker);
+                                _state.ExecuteAutomarkers(ap, Timing);
+                                _placed = true;
+                            }
+                        }
+                        break;
+                    case 12: // late firewater resolve -> drop boss marker
+                        if (_kefker != null)
+                        {
+                            bool soft = _state.cfg.AutomarkerSoft == true || AsSoftmarker;
+                            _state.ClearMarkerOn(_kefker, soft == false, soft);
+                        }
+                        break;
+                    case 2:
+                    case 4:
+                    case 8:
+                    case 10: // resolve steps -> clear for the next mechanic
+                        if (_placed == true)
+                        {
+                            _placed = false;
+                            _state.ClearAutoMarkers();
+                            // The clear above is global; bring back any gaze still live so this
+                            // step can't wipe a gaze that hasn't resolved yet.
+                            RearmPendingGazes();
+                        }
+                        break;
+                    // case 6: Ultima Upsurge hit -- nothing to display.
+                }
+            }
+
+            private void PlaceSpreads(Party pty, List<IGameObject> spreads)
+            {
+                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                if (AssignSpreads(ap, spreads) == false)
+                {
+                    return;
+                }
+                _state.ExecuteAutomarkers(ap, Timing);
+                _placed = true;
+            }
+
+            private bool AssignSpreads(AutomarkerPayload ap, List<IGameObject> spreads)
+            {
+                if (spreads.Count < 2)
+                {
+                    Log(State.LogLevelEnum.Debug, null, "[KefkaProgressive] only {0} spread(s) known -- skipping", spreads.Count);
+                    return false;
+                }
+                ap.Assign(Signs1.Roles["Forked1"], spreads[0]);
+                ap.Assign(Signs1.Roles["Forked2"], spreads[1]);
+                return true;
+            }
+
+            private void PlaceGazes(List<Tuple<IGameObject, DateTime, bool>> gazes)
+            {
+                if (gazes.Count < 2)
+                {
+                    Log(State.LogLevelEnum.Debug, null, "[KefkaProgressive] only {0} gaze(s) known -- skipping", gazes.Count);
+                    return;
+                }
+                // The 8s poll timer and the boss-cast fallback can both reach this for the same
+                // pair -- only place it once.
+                if (gazes.All(g => _gazesMarked.Contains(g.Item1) == true))
+                {
+                    return;
+                }
+                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                // Each gaze carries its own real/fake flag (Item3). A real gaze applies the gaze
+                // effect, so look away from it; a fake one is safe, so look at it. Mark them
+                // individually -- within a resolution one is real and one is fake.
+                int lookAt = 0;
+                int lookAway = 0;
+                foreach (Tuple<IGameObject, DateTime, bool> gaze in gazes)
+                {
+                    if (gaze.Item3 == true)
+                    {
+                        lookAway++;
+                        ap.Assign(Signs2.Roles["LookAway" + lookAway], gaze.Item1);
+                    }
+                    else
+                    {
+                        lookAt++;
+                        ap.Assign(Signs2.Roles["LookAt" + lookAt], gaze.Item1);
+                    }
+                    _gazesMarked.Add(gaze.Item1);
+                }
+                _state.ExecuteAutomarkers(ap, Timing);
+                _placed = true;
+            }
+
+        }
+
+        #endregion
+
         public UltDancingMad(State st) : base(st)
         {
             st.OnZoneChange += OnZoneChange;
@@ -1304,6 +1784,23 @@ namespace DancingMadness.Content
                 Log(LogLevelEnum.Debug, null, "[Forsaken] cast detected -> arming automarker");
                 _forsakenAm.Arm();
             }
+            // Progressive Kefka Says: Kefka Says opens the phase, the rest step the sequence.
+            switch (actionId)
+            {
+                case AbilityKefkaSays:
+                    Log(LogLevelEnum.Debug, null, "[KefkaProgressive] Kefka Says -> arming");
+                    _kefkaSaysProgressiveAm.Arm();
+                    break;
+                case AbilityFloodOfNaught1:
+                case AbilityFloodOfNaught2:
+                case AbilityFloodOfNaught3:
+                case AbilityFloodOfNaught4:
+                case AbilityUltimaUpsurge:
+                case AbilityManaRelease:
+                case AbilityBlizzardBlowout:
+                    _kefkaSaysProgressiveAm.AdvanceOnCast();
+                    break;
+            }
         }
 
         private void OnAction(uint src, uint dest, ushort actionId)
@@ -1312,6 +1809,10 @@ namespace DancingMadness.Content
             {
                 Log(LogLevelEnum.Debug, null, "[Forsaken] tower (Path of Light) detected");
                 _forsakenAm.FeedTower();
+            }
+            if (actionId == AbilityUltimaUpsurge)
+            {
+                _kefkaSaysProgressiveAm.AdvanceOnUpsurgeHit();
             }
         }
 
@@ -1347,6 +1848,19 @@ namespace DancingMadness.Content
                 Log(LogLevelEnum.Info, null, "[KefkaSays] debuff 0x{0:X} {1} ({2:0}s) on actor 0x{3:X}", statusId, gained == true ? "gained" : "lost", duration, dest);
                 _kefkaSaysAm.FeedStatus(dest, statusId, gained, duration);
             }
+            // Progressive Kefka Says (separate, user-toggled AM). Route the indicator by boss
+            // name (Neo Exdeath / Chaos) so Kefka's own 0x808 can't flip the real/fake state.
+            if (statusId == KefkaSaysProgressiveAM.StatusRealFakeIndicator && dest >= 0x40000000 && gained == true)
+            {
+                var indicatorGo = _state.GetActorById(dest);
+                string indicatorName = indicatorGo != null ? indicatorGo.Name.ToString() : "";
+                Log(LogLevelEnum.Info, null, "[KefkaProgressive] indicator param={0} (0x{0:X}) on '{1}'", stacks, indicatorName);
+                _kefkaSaysProgressiveAm.FeedRealFake(indicatorName, stacks);
+            }
+            if (KefkaSaysProgressiveAM.Handles(statusId) == true)
+            {
+                _kefkaSaysProgressiveAm.FeedStatus(dest, statusId, duration, gained);
+            }
         }
 
         private void OnCombatChange(bool inCombat)
@@ -1371,6 +1885,7 @@ namespace DancingMadness.Content
                 _forsakenAm = (ForsakenAM)Items["ForsakenAM"];
                 _earthquakeAm = (EarthquakeAM)Items["EarthquakeAM"];
                 _kefkaSaysAm = (KefkaSaysAM)Items["KefkaSaysAM"];
+                _kefkaSaysProgressiveAm = (KefkaSaysProgressiveAM)Items["KefkaSaysProgressiveAM"];
                 _state.OnCombatChange += OnCombatChange;
                 LogItems();
             }
