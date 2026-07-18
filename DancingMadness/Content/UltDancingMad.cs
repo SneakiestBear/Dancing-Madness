@@ -1333,6 +1333,21 @@ namespace DancingMadness.Content
             private const double GazeLeadSeconds = 8.0;
             private readonly HashSet<IGameObject> _gazesMarked = new HashSet<IGameObject>();
             private List<Tuple<bool, DateTime>> _fireWater = new List<Tuple<bool, DateTime>>();
+
+            // The boss donut/tornado is marked when its Dynamic Fluid / Entropy debuff drops to
+            // this many seconds remaining, ahead of the Ultima Upsurge / Cursed Shriek casts that
+            // used to gate it. The casts stay wired as a fallback. _fireWaterMarked keys off the
+            // resolve time (these tuples carry no actor); a resolution can span several debuff
+            // instances with near-identical resolve times, so entries within FireWaterGroupSeconds
+            // are treated as one and marked together to stop the poll timer re-placing each frame.
+            private const double FireWaterLeadSeconds = 8.0;
+            private const double FireWaterGroupSeconds = 3.0;
+            private readonly HashSet<DateTime> _fireWaterMarked = new HashSet<DateTime>();
+
+            // Set on the network thread when a Dynamic Fluid / Entropy debuff falls off (the
+            // donut/tornado has resolved); the poll thread drains it and clears the boss marker,
+            // since marking must not happen off the poll thread.
+            private volatile bool _bossClearPending = false;
             private IGameObject _kefker = null;
 
             // The set switch runs on the network thread; marking must happen on the poll thread,
@@ -1390,6 +1405,8 @@ namespace DancingMadness.Content
                 _gazes.Clear();
                 _gazesMarked.Clear();
                 _fireWater.Clear();
+                _fireWaterMarked.Clear();
+                _bossClearPending = false;
                 _kefker = null;
                 _currentSet = 0;
                 lock (_renderLock) { _renderQueue.Clear(); }
@@ -1462,15 +1479,18 @@ namespace DancingMadness.Content
                         }
                         break;
                     case StatusDynamicFluid:
-                        if (gained == true)
-                        {
-                            _fireWater.Add(new Tuple<bool, DateTime>(_chaosReal, DateTime.Now.AddSeconds(duration)));
-                        }
-                        break;
                     case StatusEntropy:
                         if (gained == true)
                         {
-                            _fireWater.Add(new Tuple<bool, DateTime>(_chaosReal == false, DateTime.Now.AddSeconds(duration)));
+                            // Dynamic Fluid -> donut when Chaos is real; Entropy is the inverse.
+                            bool donut = statusId == StatusDynamicFluid ? _chaosReal : _chaosReal == false;
+                            _fireWater.Add(new Tuple<bool, DateTime>(donut, DateTime.Now.AddSeconds(duration)));
+                        }
+                        else
+                        {
+                            // Debuff expired: the donut/tornado has resolved, so ask the poll
+                            // thread to drop the boss marker.
+                            _bossClearPending = true;
                         }
                         break;
                     case StatusCursedShriek:
@@ -1528,6 +1548,12 @@ namespace DancingMadness.Content
             protected override bool ExecutionImplementation()
             {
                 CheckGazeTimers();
+                CheckFireWaterTimers();
+                if (_bossClearPending == true)
+                {
+                    _bossClearPending = false;
+                    ClearBossMarker();
+                }
                 List<int> todo = null;
                 lock (_renderLock)
                 {
@@ -1583,6 +1609,74 @@ namespace DancingMadness.Content
                         && (g.Item2 - now).TotalSeconds > 1.0));
             }
 
+            // Poll thread: mark the boss donut/tornado once its debuff drops to
+            // FireWaterLeadSeconds remaining, ahead of the Ultima Upsurge / Cursed Shriek casts.
+            // PlaceBossMarker records the whole resolution so neither the timer nor the cast
+            // fallback places it twice.
+            private void CheckFireWaterTimers()
+            {
+                if (Active == false || _armed == false || _kefker == null)
+                {
+                    return;
+                }
+                DateTime now = DateTime.Now;
+                List<Tuple<bool, DateTime>> due =
+                    (from ix in _fireWater
+                     let remaining = (ix.Item2 - now).TotalSeconds
+                     where _fireWaterMarked.Contains(ix.Item2) == false
+                        && remaining > 0
+                        && remaining <= FireWaterLeadSeconds
+                     orderby ix.Item2 ascending
+                     select ix).Take(1).ToList();
+                if (due.Count >= 1)
+                {
+                    PlaceBossMarker(due[0]);
+                }
+            }
+
+            private void PlaceBossMarker(Tuple<bool, DateTime> fw)
+            {
+                if (_kefker == null || _fireWaterMarked.Contains(fw.Item2) == true)
+                {
+                    return;
+                }
+                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                ap.Assign(fw.Item1 == true ? Signs3.Roles["Donut"] : Signs3.Roles["Tornado"], _kefker);
+                _state.ExecuteAutomarkers(ap, Timing);
+                // Retire every debuff instance from the same resolution (near-identical resolve
+                // time) so the poll timer doesn't re-place the boss marker for each of them.
+                foreach (Tuple<bool, DateTime> other in _fireWater)
+                {
+                    if (Math.Abs((other.Item2 - fw.Item2).TotalSeconds) < FireWaterGroupSeconds)
+                    {
+                        _fireWaterMarked.Add(other.Item2);
+                    }
+                }
+            }
+
+            // Cases 7/12 clear the boss marker with ClearMarkerOn. If a boss marker was placed
+            // early and its debuff is still live, forget it so CheckFireWaterTimers re-places it
+            // next frame. The 1s margin keeps a marker whose debuff just resolved from returning.
+            private void RearmPendingFireWater()
+            {
+                DateTime now = DateTime.Now;
+                _fireWaterMarked.RemoveWhere(t => (t - now).TotalSeconds > 1.0);
+            }
+
+            // Poll thread: drop the boss donut/tornado. Any resolution still live is re-armed so
+            // this can't wipe a marker that hasn't resolved yet -- the just-expired one has ~0s
+            // remaining and stays retired.
+            private void ClearBossMarker()
+            {
+                if (_kefker == null)
+                {
+                    return;
+                }
+                bool soft = _state.cfg.AutomarkerSoft == true || AsSoftmarker;
+                _state.ClearMarkerOn(_kefker, soft == false, soft);
+                RearmPendingFireWater();
+            }
+
             private void PerformMarking(int set)
             {
                 Party pty = _state.GetPartyMembers();
@@ -1600,28 +1694,26 @@ namespace DancingMadness.Content
                             PlaceGazes(gazes);
                         }
                         break;
-                    case 5: // boss donut/tornado + late spreads (Ultima Upsurge begin)
+                    case 5: // late spreads (Ultima Upsurge begin); boss donut/tornado via poll timer
                         {
-                            AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                            // Boss marker is normally placed early by CheckFireWaterTimers; this is
+                            // the fallback and is skipped if the timer already placed it.
                             List<Tuple<bool, DateTime>> fw = (from ix in _fireWater orderby ix.Item2 ascending select ix).Take(1).ToList();
-                            if (_kefker != null && fw.Count >= 1)
+                            if (fw.Count >= 1)
                             {
-                                ap.Assign(fw[0].Item1 == true ? Signs3.Roles["Donut"] : Signs3.Roles["Tornado"], _kefker);
+                                PlaceBossMarker(fw[0]);
                             }
+                            AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
                             List<IGameObject> spreads = (from ix in _spreads orderby ix.Item2 descending select ix.Item1).Take(2).ToList();
-                            if (AssignSpreads(ap, spreads) == true || _kefker != null)
+                            if (AssignSpreads(ap, spreads) == true)
                             {
                                 _state.ExecuteAutomarkers(ap, Timing);
                                 _placed = true;
                             }
                         }
                         break;
-                    case 7: // late spreads resolve -> drop only the boss marker
-                        if (_kefker != null)
-                        {
-                            bool soft = _state.cfg.AutomarkerSoft == true || AsSoftmarker;
-                            _state.ClearMarkerOn(_kefker, soft == false, soft);
-                        }
+                    case 7: // late spreads resolve -> drop the boss marker (debuff-lost is authoritative)
+                        ClearBossMarker();
                         break;
                     case 9: // late gaze (Blizzard III Blowout)
                         {
@@ -1629,25 +1721,17 @@ namespace DancingMadness.Content
                             PlaceGazes(gazes);
                         }
                         break;
-                    case 11: // late boss donut/tornado (Cursed Shriek resolve)
-                        if (_kefker != null)
+                    case 11: // late boss donut/tornado (Cursed Shriek resolve); poll timer normally beats this
                         {
                             List<Tuple<bool, DateTime>> fw = (from ix in _fireWater orderby ix.Item2 descending select ix).Take(1).ToList();
                             if (fw.Count >= 1)
                             {
-                                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
-                                ap.Assign(fw[0].Item1 == true ? Signs3.Roles["Donut"] : Signs3.Roles["Tornado"], _kefker);
-                                _state.ExecuteAutomarkers(ap, Timing);
-                                _placed = true;
+                                PlaceBossMarker(fw[0]);
                             }
                         }
                         break;
-                    case 12: // late firewater resolve -> drop boss marker
-                        if (_kefker != null)
-                        {
-                            bool soft = _state.cfg.AutomarkerSoft == true || AsSoftmarker;
-                            _state.ClearMarkerOn(_kefker, soft == false, soft);
-                        }
+                    case 12: // late firewater resolve -> drop boss marker (debuff-lost is authoritative)
+                        ClearBossMarker();
                         break;
                     case 2:
                     case 4:
