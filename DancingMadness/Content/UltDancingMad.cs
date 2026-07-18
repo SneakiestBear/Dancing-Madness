@@ -1332,6 +1332,12 @@ namespace DancingMadness.Content
             // stay wired as a fallback; _gazesMarked keeps either path from double-placing.
             private const double GazeLeadSeconds = 8.0;
             private readonly HashSet<IGameObject> _gazesMarked = new HashSet<IGameObject>();
+
+            // The long (late) spreads are shown as soon as the first Cursed Shriek gazes resolve
+            // (set 3 -> 4), a step earlier than the Ultima Upsurge cast that used to gate them.
+            // Ultima Upsurge stays wired as a fallback; _lateSpreadsPlaced stops a double-place.
+            private bool _lateSpreadsPlaced = false;
+
             private List<Tuple<bool, DateTime>> _fireWater = new List<Tuple<bool, DateTime>>();
 
             // The boss donut/tornado is marked when its Dynamic Fluid / Entropy debuff drops to
@@ -1348,6 +1354,15 @@ namespace DancingMadness.Content
             // donut/tornado has resolved); the poll thread drains it and clears the boss marker,
             // since marking must not happen off the poll thread.
             private volatile bool _bossClearPending = false;
+
+            // The last (second) boss donut/tornado is kept this many seconds past its debuff
+            // falling off, since that debuff expires before the AoE and there is nothing after it
+            // that needs the boss marker. _bossResolutionsPlaced tells the second resolution from
+            // the first; _bossGraceClearAt (poll thread only) holds the scheduled clear time.
+            private const double BossGraceSeconds = 5.0;
+            private int _bossResolutionsPlaced = 0;
+            private DateTime _bossGraceClearAt = default;
+
             private IGameObject _kefker = null;
 
             // The set switch runs on the network thread; marking must happen on the poll thread,
@@ -1404,9 +1419,12 @@ namespace DancingMadness.Content
                 _spreads.Clear();
                 _gazes.Clear();
                 _gazesMarked.Clear();
+                _lateSpreadsPlaced = false;
                 _fireWater.Clear();
                 _fireWaterMarked.Clear();
                 _bossClearPending = false;
+                _bossResolutionsPlaced = 0;
+                _bossGraceClearAt = default;
                 _kefker = null;
                 _currentSet = 0;
                 lock (_renderLock) { _renderQueue.Clear(); }
@@ -1552,6 +1570,11 @@ namespace DancingMadness.Content
                 if (_bossClearPending == true)
                 {
                     _bossClearPending = false;
+                    RequestBossClear();
+                }
+                if (_bossGraceClearAt != default(DateTime) && DateTime.Now >= _bossGraceClearAt)
+                {
+                    _bossGraceClearAt = default;
                     ClearBossMarker();
                 }
                 List<int> todo = null;
@@ -1643,6 +1666,7 @@ namespace DancingMadness.Content
                 AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
                 ap.Assign(fw.Item1 == true ? Signs3.Roles["Donut"] : Signs3.Roles["Tornado"], _kefker);
                 _state.ExecuteAutomarkers(ap, Timing);
+                _bossResolutionsPlaced++;
                 // Retire every debuff instance from the same resolution (near-identical resolve
                 // time) so the poll timer doesn't re-place the boss marker for each of them.
                 foreach (Tuple<bool, DateTime> other in _fireWater)
@@ -1677,6 +1701,21 @@ namespace DancingMadness.Content
                 RearmPendingFireWater();
             }
 
+            // Route a boss-marker clear request. The first donut/tornado clears immediately; the
+            // second (last) one is held for BossGraceSeconds past its debuff, scheduled here and
+            // fired by the poll loop. Called on the poll thread only.
+            private void RequestBossClear()
+            {
+                if (_bossResolutionsPlaced >= 2)
+                {
+                    _bossGraceClearAt = DateTime.Now.AddSeconds(BossGraceSeconds);
+                }
+                else
+                {
+                    ClearBossMarker();
+                }
+            }
+
             private void PerformMarking(int set)
             {
                 Party pty = _state.GetPartyMembers();
@@ -1694,22 +1733,16 @@ namespace DancingMadness.Content
                             PlaceGazes(gazes);
                         }
                         break;
-                    case 5: // late spreads (Ultima Upsurge begin); boss donut/tornado via poll timer
+                    case 5: // Ultima Upsurge begin: boss donut/tornado + long spreads (both fallbacks)
                         {
-                            // Boss marker is normally placed early by CheckFireWaterTimers; this is
-                            // the fallback and is skipped if the timer already placed it.
+                            // Both are normally placed earlier (boss by CheckFireWaterTimers, long
+                            // spreads at case 4); these calls are skipped if already done.
                             List<Tuple<bool, DateTime>> fw = (from ix in _fireWater orderby ix.Item2 ascending select ix).Take(1).ToList();
                             if (fw.Count >= 1)
                             {
                                 PlaceBossMarker(fw[0]);
                             }
-                            AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
-                            List<IGameObject> spreads = (from ix in _spreads orderby ix.Item2 descending select ix.Item1).Take(2).ToList();
-                            if (AssignSpreads(ap, spreads) == true)
-                            {
-                                _state.ExecuteAutomarkers(ap, Timing);
-                                _placed = true;
-                            }
+                            PlaceLateSpreads();
                         }
                         break;
                     case 7: // late spreads resolve -> drop the boss marker (debuff-lost is authoritative)
@@ -1730,11 +1763,22 @@ namespace DancingMadness.Content
                             }
                         }
                         break;
-                    case 12: // late firewater resolve -> drop boss marker (debuff-lost is authoritative)
-                        ClearBossMarker();
+                    case 12: // late firewater resolve -> schedule the graced clear (debuff-lost is authoritative)
+                        if (_bossGraceClearAt == default(DateTime))
+                        {
+                            RequestBossClear();
+                        }
+                        break;
+                    case 4: // first shrieks resolved -> clear the gaze, then show the long spreads early
+                        if (_placed == true)
+                        {
+                            _placed = false;
+                            _state.ClearAutoMarkers();
+                            RearmPendingGazes();
+                        }
+                        PlaceLateSpreads();
                         break;
                     case 2:
-                    case 4:
                     case 8:
                     case 10: // resolve steps -> clear for the next mechanic
                         if (_placed == true)
@@ -1758,6 +1802,26 @@ namespace DancingMadness.Content
                     return;
                 }
                 _state.ExecuteAutomarkers(ap, Timing);
+                _placed = true;
+            }
+
+            // The long (late) spread pair -- shown when the first shrieks resolve (case 4), with
+            // Ultima Upsurge (case 5) as a fallback. Places once; if the debuffs aren't known yet
+            // it skips quietly so the fallback can catch it.
+            private void PlaceLateSpreads()
+            {
+                if (_lateSpreadsPlaced == true)
+                {
+                    return;
+                }
+                AutomarkerPayload ap = new AutomarkerPayload(_state, SelfMarkOnly, AsSoftmarker);
+                List<IGameObject> spreads = (from ix in _spreads orderby ix.Item2 descending select ix.Item1).Take(2).ToList();
+                if (AssignSpreads(ap, spreads) == false)
+                {
+                    return;
+                }
+                _state.ExecuteAutomarkers(ap, Timing);
+                _lateSpreadsPlaced = true;
                 _placed = true;
             }
 
